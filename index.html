@@ -66,6 +66,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
       <option value="bf_emma">Emma (UK female)</option><option value="bm_george">George (UK male)</option>
     </select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
+    <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
   </section>
   <section>
     <h2>Generate</h2>
@@ -93,7 +94,7 @@ const W=720,H=1280, cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,count:1};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',count:1};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -222,20 +223,24 @@ async function record(bg,speech){
   const vid=document.createElement('video'); vid.src=URL.createObjectURL(bg.blob); vid.muted=true; vid.loop=true; vid.playsInline=true;
   await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=()=>rej(new Error('Could not read clip '+bg.name))});
   if(vid.duration>speech.duration+2) vid.currentTime=Math.random()*(vid.duration-speech.duration-1);
-  const ac=new AudioContext({sampleRate:speech.rate}); await ac.resume();
+  const ac=new AudioContext(); await ac.resume();
   const buf=ac.createBuffer(1,speech.pcm.length,speech.rate); buf.copyToChannel(speech.pcm,0);
   const dest=ac.createMediaStreamDestination(), src=ac.createBufferSource(); src.buffer=buf; src.connect(dest);
-  const mimes=['video/mp4;codecs=avc1,mp4a.40.2','video/webm;codecs=vp9,opus','video/webm'];
+  const mimes=S.fmt==='mp4'?['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm']:['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
   const mime=mimes.find(m=>MediaRecorder.isTypeSupported(m));
   const stream=new MediaStream([...cv.captureStream(30).getVideoTracks(),...dest.stream.getAudioTracks()]);
   const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:6e6}), parts=[];
   rec.ondataavailable=e=>e.data.size&&parts.push(e.data);
+  rec.onerror=e=>log('Recorder error: '+((e.error&&e.error.message)||'unknown'));
   const done=new Promise(r=>rec.onstop=r);
   await vid.play(); rec.start(500); const t0=ac.currentTime; src.start(); let live=true;
-  src.onended=()=>setTimeout(()=>{live=false;rec.stop()},400);
-  (function frame(){ if(!live) return; drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); requestAnimationFrame(frame); })();
+  src.onended=()=>setTimeout(()=>{live=false;clearInterval(timer);rec.stop()},400);
+  const timer=setInterval(()=>{ try{ drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); }catch(e){ log('Draw error: '+e.message); } },33);
   await done; vid.pause(); URL.revokeObjectURL(vid.src); ac.close();
-  return {blob:new Blob(parts,{type:mime.split(';')[0]}),ext:mime.startsWith('video/mp4')?'mp4':'webm'};
+  const blob=new Blob(parts,{type:mime.split(';')[0]});
+  if(blob.size<2000) throw new Error('Recording came out empty ('+mime+'). Try the other format under Voice and captions.');
+  log('Recorded '+(blob.size/1e6).toFixed(1)+' MB as '+mime);
+  return {blob,ext:mime.startsWith('video/mp4')?'mp4':'webm'};
 }
 
 /* ---------- main ---------- */
