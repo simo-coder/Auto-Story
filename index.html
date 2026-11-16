@@ -144,16 +144,44 @@ function pickStory(){
 }
 
 /* ---------- text to speech (Kokoro, runs locally) ---------- */
+const workerSrc=`
+import {KokoroTTS} from 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.0/+esm';
 let tts;
-async function loadTTS(){
-  if(tts) return tts;
-  log('Loading voice model (about 80 MB the first time, cached after)...');
-  const {KokoroTTS}=await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.0/+esm');
-  const bar=$('#bar'); bar.hidden=false;
-  tts=await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',{dtype:'q8',device:'wasm',
-    progress_callback:p=>{ if(p.status==='progress'){bar.value=p.progress/100} }});
-  bar.hidden=true; return tts;
+self.onmessage=async e=>{
+  const {id,type,text,voice}=e.data;
+  try{
+    if(type==='load'){
+      tts=await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',{dtype:'q8',device:'wasm',
+        progress_callback:p=>{if(p.status==='progress')self.postMessage({id,progress:p.progress/100})}});
+      self.postMessage({id,done:true});
+    }else{
+      const a=await tts.generate(text,{voice});
+      self.postMessage({id,done:true,audio:a.audio,rate:a.sampling_rate});
+    }
+  }catch(err){self.postMessage({id,error:String((err&&err.message)||err)})}
+};`;
+let worker, msgId=0; const pending={};
+function callWorker(msg,onProgress){
+  if(!worker){
+    worker=new Worker(URL.createObjectURL(new Blob([workerSrc],{type:'text/javascript'})),{type:'module'});
+    worker.onmessage=e=>{const m=e.data,p=pending[m.id]; if(!p) return;
+      if(m.progress!==undefined&&!m.done){p.onProgress&&p.onProgress(m.progress);return}
+      delete pending[m.id]; m.error?p.rej(new Error(m.error)):p.res(m)};
+    worker.onerror=e=>{for(const id in pending){pending[id].rej(new Error('Voice worker failed: '+(e.message||'could not load model code')));delete pending[id]} worker=null};
+  }
+  return new Promise((res,rej)=>{const id=++msgId;pending[id]={res,rej,onProgress};worker.postMessage({...msg,id})});
 }
+let ready;
+async function loadTTS(){
+  if(!ready){
+    log('Loading voice model (about 80 MB the first time, cached after). The page stays usable while this runs...');
+    const bar=$('#bar'); bar.hidden=false; bar.value=0;
+    ready=callWorker({type:'load'},p=>{bar.value=p}).then(()=>{bar.hidden=true;log('Voice model ready.')});
+    ready.catch(()=>{ready=null;bar.hidden=true});
+  }
+  await ready;
+}
+const gen=text=>callWorker({type:'gen',text,voice:S.voice});
 function sentences(text){
   const out=[]; for(const s of text.split(/(?<=[.!?])\s+/)){
     if(s.length<=220){out.push(s);continue}
@@ -165,7 +193,7 @@ async function speak(story){
   const rate=24000, gap=Math.round(rate*0.18), chunks=[], words=[]; let pos=0;
   for(let i=0;i<parts.length;i++){
     log(`Speaking ${i+1}/${parts.length}`); $('#bar').hidden=false; $('#bar').value=i/parts.length;
-    const a=await t.generate(parts[i],{voice:S.voice}); const data=a.audio, dur=data.length/rate, t0=pos/rate;
+    const a=await gen(parts[i]); const data=a.audio, dur=data.length/rate, t0=pos/rate;
     const ws=parts[i].split(/\s+/).filter(Boolean), tot=ws.reduce((n,w)=>n+w.length+1,0); let c=0;
     for(const w of ws){ const s=t0+dur*c/tot; c+=w.length+1; words.push({w,s,e:t0+dur*c/tot}); }
     chunks.push(data); pos+=data.length+gap;
