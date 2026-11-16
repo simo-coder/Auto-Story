@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 5</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 6</span></header>
 <main>
 <aside>
   <section>
@@ -67,6 +67,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
     </select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
+    <label for="maxmin">Max video length (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
   </section>
   <section>
     <h2>Generate</h2>
@@ -94,7 +95,7 @@ const W=720,H=1280, cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',count:1};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,count:1};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -138,10 +139,11 @@ function pickStory(){
     const id=hash(raw); if(used.has(id)) continue;
     const lines=raw.split('\n'), first=clean(lines[0]), rest=clean(lines.slice(1).join('\n'));
     const title=rest?first:'', body=rest||first;
-    if(body.split(/\s+/).length<5) continue;
+    const nw=body.split(/\s+/).length+(title?title.split(/\s+/).length:0); if(nw<5) continue;
+    if(nw/2.6>((S.maxmin>0?S.maxmin:2)*60)*1.25) continue; // clearly too long, skip without marking
     return {id,sub:'story',title,body};
   }
-  throw new Error('No new stories left. Paste more (stories already used are skipped).');
+  throw new Error('No new stories left that fit the length limit. Paste more, or raise the max video length. (Stories already used are skipped.)');
 }
 
 /* ---------- text to speech (Kokoro, runs locally) ---------- */
@@ -191,13 +193,14 @@ function sentences(text){
 }
 async function speak(story){
   const t=await loadTTS(); const parts=sentences((story.title?story.title+(/[.!?]$/.test(story.title)?' ':'. '):'')+story.body);
-  const rate=24000, gap=Math.round(rate*0.18), chunks=[], words=[]; let pos=0;
+  const maxSec=(S.maxmin>0?S.maxmin:2)*60; const rate=24000, gap=Math.round(rate*0.18), chunks=[], words=[]; let pos=0;
   for(let i=0;i<parts.length;i++){
     log(`Speaking ${i+1}/${parts.length}`); $('#bar').hidden=false; $('#bar').value=i/parts.length;
     const a=await gen(parts[i]); const data=a.audio, dur=data.length/rate, t0=pos/rate;
     const ws=parts[i].split(/\s+/).filter(Boolean), tot=ws.reduce((n,w)=>n+w.length+1,0); let c=0;
     for(const w of ws){ const s=t0+dur*c/tot; c+=w.length+1; words.push({w,s,e:t0+dur*c/tot}); }
     chunks.push(data); pos+=data.length+gap;
+    if(pos/rate>maxSec){const err=new Error('too long');err.tooLong=true;throw err}
   }
   $('#bar').hidden=true;
   const pcm=new Float32Array(pos); let o=0; for(const c of chunks){pcm.set(c,o);o+=c.length+gap}
@@ -250,8 +253,16 @@ $('#go').onclick=async()=>{
     const bgs=await allBgs(); if(!bgs.length) throw new Error('Add at least one background video first.');
     for(let n=1;n<=S.count;n++){
       log(`--- Video ${n} of ${S.count} ---`);
-      const story=await pickStory(); log('Story: '+(story.title||story.body).slice(0,70));
-      const speech=await speak(story);
+      let story,speech;
+      for(;;){
+        story=await pickStory(); log('Story: '+(story.title||story.body).slice(0,70));
+        try{ speech=await speak(story); break; }
+        catch(e){
+          if(!e.tooLong) throw e;
+          used.add(story.id); LS.set('cc_used',[...used]); showUsed(); $('#bar').hidden=true;
+          log('Skipped: this story runs longer than '+S.maxmin+' minutes. Trying the next one.');
+        }
+      }
       const bg=bgs[Math.floor(Math.random()*bgs.length)]; log(`Recording with ${bg.name} (${Math.round(speech.duration)} seconds)...`);
       const out=await record(bg,speech);
       used.add(story.id); LS.set('cc_used',[...used]); showUsed();
