@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 6</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 7</span></header>
 <main>
 <aside>
   <section>
@@ -65,6 +65,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
       <option value="am_michael">Michael (US male)</option><option value="am_fenrir">Fenrir (US male)</option>
       <option value="bf_emma">Emma (UK female)</option><option value="bm_george">George (UK male)</option>
     </select>
+    <label for="speed">Speaking speed</label><select id="speed"><option value="0.9">0.9x (slower)</option><option value="1">1x (normal)</option><option value="1.1">1.1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x (very fast)</option></select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
     <label for="maxmin">Max video length (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
@@ -95,7 +96,7 @@ const W=720,H=1280, cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,count:1};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1',count:1};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -140,7 +141,7 @@ function pickStory(){
     const lines=raw.split('\n'), first=clean(lines[0]), rest=clean(lines.slice(1).join('\n'));
     const title=rest?first:'', body=rest||first;
     const nw=body.split(/\s+/).length+(title?title.split(/\s+/).length:0); if(nw<5) continue;
-    if(nw/2.6>((S.maxmin>0?S.maxmin:2)*60)*1.25) continue; // clearly too long, skip without marking
+    if(nw/(2.6*(+S.speed||1))>((S.maxmin>0?S.maxmin:2)*60)*1.25) continue; // clearly too long, skip without marking
     return {id,sub:'story',title,body};
   }
   throw new Error('No new stories left that fit the length limit. Paste more, or raise the max video length. (Stories already used are skipped.)');
@@ -151,14 +152,14 @@ const workerSrc=`
 import {KokoroTTS} from 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.0/+esm';
 let tts;
 self.onmessage=async e=>{
-  const {id,type,text,voice}=e.data;
+  const {id,type,text,voice,speed}=e.data;
   try{
     if(type==='load'){
       tts=await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',{dtype:'q8',device:'wasm',
         progress_callback:p=>{if(p.status==='progress')self.postMessage({id,progress:p.progress/100})}});
       self.postMessage({id,done:true});
     }else{
-      const a=await tts.generate(text,{voice});
+      const a=await tts.generate(text,{voice,speed});
       self.postMessage({id,done:true,audio:a.audio,rate:a.sampling_rate});
     }
   }catch(err){self.postMessage({id,error:String((err&&err.message)||err)})}
@@ -184,7 +185,7 @@ async function loadTTS(){
   }
   await ready;
 }
-const gen=text=>callWorker({type:'gen',text,voice:S.voice});
+const gen=text=>callWorker({type:'gen',text,voice:S.voice,speed:+S.speed||1});
 function sentences(text){
   const out=[]; for(const s of text.split(/(?<=[.!?])\s+/)){
     if(s.length<=220){out.push(s);continue}
