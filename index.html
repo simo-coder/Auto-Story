@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 7</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 8</span></header>
 <main>
 <aside>
   <section>
@@ -68,13 +68,14 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
     <label for="speed">Speaking speed</label><select id="speed"><option value="0.9">0.9x (slower)</option><option value="1">1x (normal)</option><option value="1.1">1.1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x (very fast)</option></select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
-    <label for="maxmin">Max video length (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
+    <label for="maxmin">Max length of one video (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
   </section>
   <section>
     <h2>Generate</h2>
-    <label for="count">How many videos</label><input id="count" type="number" min="1" max="10">
+    <p class="hint">Makes a video for every new story in the box. Stories longer than the max length are split into parts automatically.</p>
     <p class="hint" style="margin-top:10px">Stories used so far: <b id="usedn">0</b> <button class="link" id="reset">Reset history</button></p>
-    <button class="go" id="go">Make video</button>
+    <button class="go" id="go">Make videos</button>
+    <button id="stop" style="width:100%;margin-top:8px" hidden>Stop after this story</button>
   </section>
 </aside>
 <div class="stage">
@@ -96,7 +97,7 @@ const W=720,H=1280, cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1',count:1};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1'};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -141,10 +142,9 @@ function pickStory(){
     const lines=raw.split('\n'), first=clean(lines[0]), rest=clean(lines.slice(1).join('\n'));
     const title=rest?first:'', body=rest||first;
     const nw=body.split(/\s+/).length+(title?title.split(/\s+/).length:0); if(nw<5) continue;
-    if(nw/(2.6*(+S.speed||1))>((S.maxmin>0?S.maxmin:2)*60)*1.25) continue; // clearly too long, skip without marking
     return {id,sub:'story',title,body};
   }
-  throw new Error('No new stories left that fit the length limit. Paste more, or raise the max video length. (Stories already used are skipped.)');
+  throw new Error('No new stories left. Paste more (stories already used are skipped).');
 }
 
 /* ---------- text to speech (Kokoro, runs locally) ---------- */
@@ -192,20 +192,39 @@ function sentences(text){
     let cur=''; for(const part of s.split(/(?<=,)\s+/)){ if((cur+part).length>220&&cur){out.push(cur);cur=part}else cur+=(cur?' ':'')+part } if(cur)out.push(cur);
   } return out.filter(s=>s.trim());
 }
+let stopReq=false;
 async function speak(story){
-  const t=await loadTTS(); const parts=sentences((story.title?story.title+(/[.!?]$/.test(story.title)?' ':'. '):'')+story.body);
-  const maxSec=(S.maxmin>0?S.maxmin:2)*60; const rate=24000, gap=Math.round(rate*0.18), chunks=[], words=[]; let pos=0;
+  await loadTTS();
+  const parts=sentences((story.title?story.title+(/[.!?]$/.test(story.title)?' ':'. '):'')+story.body);
+  const rate=24000, out=[];
   for(let i=0;i<parts.length;i++){
+    if(stopReq){const e=new Error('Stopped');e.stopped=true;throw e}
     log(`Speaking ${i+1}/${parts.length}`); $('#bar').hidden=false; $('#bar').value=i/parts.length;
-    const a=await gen(parts[i]); const data=a.audio, dur=data.length/rate, t0=pos/rate;
-    const ws=parts[i].split(/\s+/).filter(Boolean), tot=ws.reduce((n,w)=>n+w.length+1,0); let c=0;
-    for(const w of ws){ const s=t0+dur*c/tot; c+=w.length+1; words.push({w,s,e:t0+dur*c/tot}); }
-    chunks.push(data); pos+=data.length+gap;
-    if(pos/rate>maxSec){const err=new Error('too long');err.tooLong=true;throw err}
+    const a=await gen(parts[i]), data=a.audio, dur=data.length/rate;
+    const ws=parts[i].split(/\s+/).filter(Boolean), tot=ws.reduce((n,w)=>n+w.length+1,0); let c=0; const words=[];
+    for(const w of ws){ const st=dur*c/tot; c+=w.length+1; words.push({w,s:st,e:dur*c/tot}); }
+    out.push({data,dur,words});
   }
   $('#bar').hidden=true;
-  const pcm=new Float32Array(pos); let o=0; for(const c of chunks){pcm.set(c,o);o+=c.length+gap}
-  return {pcm,rate,words,duration:pos/rate};
+  return out;
+}
+function buildPart(g){
+  const rate=24000, gap=Math.round(rate*0.18), len=g.reduce((n,x)=>n+x.data.length+gap,0);
+  const pcm=new Float32Array(len), words=[]; let pos=0;
+  for(const x of g){ pcm.set(x.data,pos); const t0=pos/rate; for(const w of x.words) words.push({w:w.w,s:t0+w.s,e:t0+w.e}); pos+=x.data.length+gap; }
+  return {pcm,rate,words,duration:len/rate};
+}
+function splitParts(sents){
+  const gapS=0.18, maxSec=(S.maxmin>0?S.maxmin:2)*60;
+  const total=sents.reduce((n,x)=>n+x.dur+gapS,0), n=Math.max(1,Math.ceil(total/maxSec)), target=total/n;
+  const groups=[]; let cur=[], d=0;
+  for(const x of sents){
+    if(cur.length&&d+x.dur+gapS>maxSec){groups.push(cur);cur=[];d=0}
+    cur.push(x); d+=x.dur+gapS;
+    if(d>=target&&groups.length<n-1){groups.push(cur);cur=[];d=0}
+  }
+  if(cur.length) groups.push(cur);
+  return groups.map(buildPart);
 }
 
 /* ---------- captions + recording ---------- */
@@ -223,7 +242,8 @@ function drawCaption(words,t){
   let x=(W-tw)/2; g.textAlign='left'; g.textBaseline='middle'; g.lineJoin='round'; g.lineWidth=size/6;
   txt.forEach((s,k)=>{ g.strokeStyle='#000'; g.strokeText(s,x,H/2); g.fillStyle=(a+k===i)?'#F2B134':'#fff'; g.fillText(s,x,H/2); x+=g.measureText(s).width+sp; });
 }
-async function record(bg,speech){
+function drawLabel(t){g.font='700 64px "Familjen Grotesk",Arial';g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';g.lineWidth=12;g.strokeStyle='#000';g.strokeText(t,W/2,200);g.fillStyle='#fff';g.fillText(t,W/2,200);}
+async function record(bg,speech,label){
   const vid=document.createElement('video'); vid.src=URL.createObjectURL(bg.blob); vid.muted=true; vid.loop=true; vid.playsInline=true;
   await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=()=>rej(new Error('Could not read clip '+bg.name))});
   if(vid.duration>speech.duration+2) vid.currentTime=Math.random()*(vid.duration-speech.duration-1);
@@ -239,7 +259,7 @@ async function record(bg,speech){
   const done=new Promise(r=>rec.onstop=r);
   await vid.play(); rec.start(500); const t0=ac.currentTime; src.start(); let live=true;
   src.onended=()=>setTimeout(()=>{live=false;clearInterval(timer);rec.stop()},400);
-  const timer=setInterval(()=>{ try{ drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); }catch(e){ log('Draw error: '+e.message); } },33);
+  const timer=setInterval(()=>{ try{ drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); if(label) drawLabel(label); }catch(e){ log('Draw error: '+e.message); } },33);
   await done; vid.pause(); URL.revokeObjectURL(vid.src); ac.close();
   const blob=new Blob(parts,{type:mime.split(';')[0]});
   if(blob.size<Math.max(2000,speech.duration*30000)) throw new Error('Recording is too small ('+(blob.size/1e6).toFixed(2)+' MB for '+Math.round(speech.duration)+' seconds), so the picture is probably missing. Format used: '+mime+'. Try the other format under Voice and captions.');
@@ -248,36 +268,35 @@ async function record(bg,speech){
 }
 
 /* ---------- main ---------- */
+$('#stop').onclick=()=>{stopReq=true;$('#stop').textContent='Stopping after this story...'};
 $('#go').onclick=async()=>{
-  const btn=$('#go'); btn.disabled=true; $('#log').textContent='';
+  const btn=$('#go'), sb=$('#stop'); btn.disabled=true; sb.hidden=false; sb.textContent='Stop after this story'; stopReq=false; $('#log').textContent='';
+  let made=0;
   try{
     const bgs=await allBgs(); if(!bgs.length) throw new Error('Add at least one background video first.');
-    for(let n=1;n<=S.count;n++){
-      log(`--- Video ${n} of ${S.count} ---`);
-      let story,speech;
-      for(;;){
-        story=await pickStory(); log('Story: '+(story.title||story.body).slice(0,70));
-        try{ speech=await speak(story); break; }
-        catch(e){
-          if(!e.tooLong) throw e;
-          used.add(story.id); LS.set('cc_used',[...used]); showUsed(); $('#bar').hidden=true;
-          log('Skipped: this story runs longer than '+S.maxmin+' minutes. Trying the next one.');
-        }
+    while(!stopReq){
+      let story; try{ story=pickStory(); }catch(e){ if(made){ log('No more new stories. All done.'); break } throw e }
+      log('--- Story: '+(story.title||story.body).slice(0,70)+' ---');
+      const parts=splitParts(await speak(story));
+      if(parts.length>1) log(`Splitting into ${parts.length} parts.`);
+      for(let i=0;i<parts.length;i++){
+        const multi=parts.length>1, bg=bgs[Math.floor(Math.random()*bgs.length)];
+        log(`Recording ${multi?'part '+(i+1)+' of '+parts.length:'video'} with ${bg.name} (${Math.round(parts[i].duration)} seconds)...`);
+        const out=await record(bg,parts[i],multi?'PART '+(i+1):'');
+        const url=URL.createObjectURL(out.blob), d=document.createElement('div'); d.className='vid';
+        const file=new File([out.blob],`${story.id}${multi?'_part'+(i+1):''}.${out.ext}`,{type:out.blob.type});
+        const canShare=!!(navigator.canShare&&navigator.canShare({files:[file]}));
+        d.innerHTML=`<video src="${url}" controls playsinline></video><div><small></small><a download="${file.name}" href="${url}">Download .${out.ext} (${(out.blob.size/1e6).toFixed(1)} MB)</a>${canShare?'<br><button class="share" style="margin-top:8px">Share to TikTok / Instagram</button>':''}</div>`;
+        d.querySelector('small').textContent=(story.title||story.body).slice(0,80)+(multi?` (part ${i+1})`:'');
+        const shb=d.querySelector('.share');
+        if(shb) shb.onclick=async()=>{try{await navigator.share({files:[file]})}catch(e){if(e.name!=='AbortError')log('Share failed: '+e.message)}};
+        $('#results').prepend(d);
       }
-      const bg=bgs[Math.floor(Math.random()*bgs.length)]; log(`Recording with ${bg.name} (${Math.round(speech.duration)} seconds)...`);
-      const out=await record(bg,speech);
-      used.add(story.id); LS.set('cc_used',[...used]); showUsed();
-      const url=URL.createObjectURL(out.blob), d=document.createElement('div'); d.className='vid';
-      const file=new File([out.blob],`${story.id}.${out.ext}`,{type:out.blob.type});
-      const canShare=!!(navigator.canShare&&navigator.canShare({files:[file]}));
-      d.innerHTML=`<video src="${url}" controls playsinline></video><div><small></small><a download="${story.id}.${out.ext}" href="${url}">Download .${out.ext} (${(out.blob.size/1e6).toFixed(1)} MB)</a>${canShare?'<br><button class="share" style="margin-top:8px">Share to TikTok / Instagram</button>':''}</div>`;
-      d.querySelector('small').textContent=(story.title||story.body).slice(0,80);
-      const sb=d.querySelector('.share');
-      if(sb) sb.onclick=async()=>{try{await navigator.share({files:[file]})}catch(e){if(e.name!=='AbortError')log('Share failed: '+e.message)}};
-      $('#results').prepend(d); log('Done.');
+      used.add(story.id); LS.set('cc_used',[...used]); showUsed(); made++; log('Story done.');
     }
-  }catch(e){ log('Error: '+e.message); }
-  finally{ btn.disabled=false; idle(); }
+    if(stopReq) log('Stopped.');
+  }catch(e){ if(e.stopped) log('Stopped.'); else log('Error: '+e.message); }
+  finally{ btn.disabled=false; sb.hidden=true; idle(); }
 };
 </script>
 </body>
