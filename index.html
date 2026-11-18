@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 8</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 12</span></header>
 <main>
 <aside>
   <section>
@@ -60,11 +60,9 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
   <section>
     <h2>Voice and captions</h2>
     <label for="voice">Voice</label>
-    <select id="voice">
-      <option value="af_heart">Heart (US female)</option><option value="af_bella">Bella (US female)</option>
-      <option value="am_michael">Michael (US male)</option><option value="am_fenrir">Fenrir (US male)</option>
-      <option value="bf_emma">Emma (UK female)</option><option value="bm_george">George (UK male)</option>
-    </select>
+    <select id="voice"><optgroup label="US female"><option value="af_heart">Heart</option><option value="af_bella">Bella</option><option value="af_nicole">Nicole</option><option value="af_sarah">Sarah</option><option value="af_sky">Sky</option><option value="af_nova">Nova</option><option value="af_aoede">Aoede</option><option value="af_alloy">Alloy</option><option value="af_jessica">Jessica</option><option value="af_kore">Kore</option><option value="af_river">River</option></optgroup><optgroup label="US male"><option value="am_michael">Michael</option><option value="am_fenrir">Fenrir</option><option value="am_adam">Adam</option><option value="am_eric">Eric</option><option value="am_liam">Liam</option><option value="am_echo">Echo</option><option value="am_onyx">Onyx</option><option value="am_puck">Puck</option><option value="am_santa">Santa</option></optgroup><optgroup label="UK female"><option value="bf_emma">Emma</option><option value="bf_isabella">Isabella</option></optgroup><optgroup label="UK male"><option value="bm_george">George</option><option value="bm_lewis">Lewis</option></optgroup></select>
+    <button id="prev" style="margin-top:8px">Preview this voice</button>
+    <p class="hint" style="margin-top:6px">A sample plays when you pick a voice or speed. The first one takes longer while the voice model downloads.</p>
     <label for="speed">Speaking speed</label><select id="speed"><option value="0.9">0.9x (slower)</option><option value="1">1x (normal)</option><option value="1.1">1.1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x (very fast)</option></select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
@@ -235,16 +233,27 @@ function drawBg(v){
 function drawCaption(words,t){
   let i=words.findIndex(x=>x.e>=t); if(i<0) i=words.length-1; if(words[i].s>t&&i>0) i--;
   const a=i-(i%S.wpc), grp=words.slice(a,a+S.wpc);
-  let size=78; g.font=`700 ${size}px "Familjen Grotesk",Arial`;
-  const txt=grp.map(x=>x.w.toUpperCase()); let sp=g.measureText(' ').width;
-  let tw=txt.reduce((n,x)=>n+g.measureText(x).width,0)+sp*(txt.length-1);
-  if(tw>W-80){ size=Math.floor(size*(W-80)/tw); g.font=`700 ${size}px "Familjen Grotesk",Arial`; sp=g.measureText(' ').width; tw=txt.reduce((n,x)=>n+g.measureText(x).width,0)+sp*(txt.length-1); }
-  let x=(W-tw)/2; g.textAlign='left'; g.textBaseline='middle'; g.lineJoin='round'; g.lineWidth=size/6;
-  txt.forEach((s,k)=>{ g.strokeStyle='#000'; g.strokeText(s,x,H/2); g.fillStyle=(a+k===i)?'#F2B134':'#fff'; g.fillText(s,x,H/2); x+=g.measureText(s).width+sp; });
+  const size=70; g.font=`700 ${size}px "Familjen Grotesk",Arial`;
+  g.textAlign='left'; g.textBaseline='middle'; g.lineJoin='round'; g.lineWidth=size/6;
+  const sp=g.measureText(' ').width, maxW=W-100;
+  const items=grp.map((x,k)=>{const u=x.w.toUpperCase();return {t:u,w:g.measureText(u).width,hot:a+k===i}});
+  const lines=[]; let line=[], lw=0;
+  for(const it of items){
+    const add=(line.length?sp:0)+it.w;
+    if(line.length&&lw+add>maxW){lines.push({line,lw});line=[];lw=0}
+    lw+=(line.length?sp:0)+it.w; line.push(it);
+  }
+  if(line.length) lines.push({line,lw});
+  const lh=size*1.2, y0=H/2-(lines.length-1)*lh/2;
+  lines.forEach((L,r)=>{
+    let x=(W-L.lw)/2; const y=y0+r*lh;
+    for(const it of L.line){ g.strokeStyle='#000'; g.strokeText(it.t,x,y); g.fillStyle=it.hot?'#F2B134':'#fff'; g.fillText(it.t,x,y); x+=it.w+sp; }
+  });
 }
 function drawLabel(t){g.font='700 64px "Familjen Grotesk",Arial';g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';g.lineWidth=12;g.strokeStyle='#000';g.strokeText(t,W/2,200);g.fillStyle='#fff';g.fillText(t,W/2,200);}
 async function record(bg,speech,label){
   const vid=document.createElement('video'); vid.src=URL.createObjectURL(bg.blob); vid.muted=true; vid.loop=true; vid.playsInline=true;
+  vid.style.cssText='position:fixed;left:0;top:0;width:2px;height:2px;opacity:.01;pointer-events:none'; document.body.appendChild(vid);
   await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=()=>rej(new Error('Could not read clip '+bg.name))});
   if(vid.duration>speech.duration+2) vid.currentTime=Math.random()*(vid.duration-speech.duration-1);
   const ac=new AudioContext(); await ac.resume();
@@ -257,15 +266,42 @@ async function record(bg,speech,label){
   rec.ondataavailable=e=>e.data.size&&parts.push(e.data);
   rec.onerror=e=>log('Recorder error: '+((e.error&&e.error.message)||'unknown'));
   const done=new Promise(r=>rec.onstop=r);
-  await vid.play(); rec.start(500); const t0=ac.currentTime; src.start(); let live=true;
+  if(document.hidden){
+    log('Voice is ready. Switch back to this tab so recording can start...');
+    await new Promise(r=>{const f=()=>{if(!document.hidden){document.removeEventListener('visibilitychange',f);r()}};document.addEventListener('visibilitychange',f)});
+  }
+  for(let k=0;;k++){ try{ await vid.play(); break; }catch(e){ if(k>=3) throw e; await new Promise(r=>setTimeout(r,500)); } }
+  rec.start(500); const t0=ac.currentTime; src.start(); let live=true;
   src.onended=()=>setTimeout(()=>{live=false;clearInterval(timer);rec.stop()},400);
-  const timer=setInterval(()=>{ try{ drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); if(label) drawLabel(label); }catch(e){ log('Draw error: '+e.message); } },33);
-  await done; vid.pause(); URL.revokeObjectURL(vid.src); ac.close();
+  const timer=setInterval(()=>{ try{ if(vid.paused&&!document.hidden) vid.play().catch(()=>{}); drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); if(label) drawLabel(label); }catch(e){ log('Draw error: '+e.message); } },33);
+  await done; vid.pause(); vid.remove(); URL.revokeObjectURL(vid.src); ac.close();
   const blob=new Blob(parts,{type:mime.split(';')[0]});
   if(blob.size<Math.max(2000,speech.duration*30000)) throw new Error('Recording is too small ('+(blob.size/1e6).toFixed(2)+' MB for '+Math.round(speech.duration)+' seconds), so the picture is probably missing. Format used: '+mime+'. Try the other format under Voice and captions.');
   log('Recorded '+(blob.size/1e6).toFixed(1)+' MB as '+mime);
   return {blob,ext:mime.startsWith('video/mp4')?'mp4':'webm'};
 }
+
+/* ---------- voice preview (plays automatically when you pick a voice or speed) ---------- */
+let prevToken=0, prevAc=null; const prevCache=new Map();
+async function preview(){
+  const my=++prevToken, b=$('#prev'), key=S.voice+'|'+S.speed;
+  if(prevAc){ try{prevAc.close()}catch{} prevAc=null; }
+  b.textContent='Loading voice...';
+  try{
+    let audio=prevCache.get(key);
+    if(!audio){
+      await loadTTS(); if(my!==prevToken) return;
+      audio=(await gen('So this happened last week, and honestly I still cannot believe it.')).audio; prevCache.set(key,audio);
+    }
+    if(my!==prevToken) return;
+    const ac=new AudioContext(); prevAc=ac; await ac.resume();
+    const buf=ac.createBuffer(1,audio.length,24000); buf.copyToChannel(audio,0);
+    const src=ac.createBufferSource(); src.buffer=buf; src.connect(ac.destination);
+    src.onended=()=>{ if(prevAc===ac) prevAc=null; ac.close().catch(()=>{}); }; src.start();
+  }catch(e){ log('Preview failed: '+e.message); }
+  finally{ if(my===prevToken) b.textContent='Preview this voice'; }
+}
+$('#prev').onclick=preview; $('#voice').addEventListener('change',preview); $('#speed').addEventListener('change',preview);
 
 /* ---------- main ---------- */
 $('#stop').onclick=()=>{stopReq=true;$('#stop').textContent='Stopping after this story...'};
