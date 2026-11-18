@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 12</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 13</span></header>
 <main>
 <aside>
   <section>
@@ -66,6 +66,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
     <label for="speed">Speaking speed</label><select id="speed"><option value="0.9">0.9x (slower)</option><option value="1">1x (normal)</option><option value="1.1">1.1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x (very fast)</option></select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
+    <label for="quality">Video quality</label><select id="quality"><option value="auto">Auto (match background clip)</option><option value="720">720p (720x1280)</option><option value="1080">1080p (1080x1920)</option></select>
     <label for="maxmin">Max length of one video (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
   </section>
   <section>
@@ -91,11 +92,11 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 <script type="module">
 const $ = s => document.querySelector(s);
 const LS = {get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}},set:(k,v)=>localStorage.setItem(k,JSON.stringify(v))};
-const W=720,H=1280, cv=$('#cv'), g=cv.getContext('2d');
+let W=720,H=1280; const cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1'};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1',quality:'auto'};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -233,9 +234,9 @@ function drawBg(v){
 function drawCaption(words,t){
   let i=words.findIndex(x=>x.e>=t); if(i<0) i=words.length-1; if(words[i].s>t&&i>0) i--;
   const a=i-(i%S.wpc), grp=words.slice(a,a+S.wpc);
-  const size=70; g.font=`700 ${size}px "Familjen Grotesk",Arial`;
+  const sc=W/720, size=Math.round(70*sc); g.font=`700 ${size}px "Familjen Grotesk",Arial`;
   g.textAlign='left'; g.textBaseline='middle'; g.lineJoin='round'; g.lineWidth=size/6;
-  const sp=g.measureText(' ').width, maxW=W-100;
+  const sp=g.measureText(' ').width, maxW=W-100*sc;
   const items=grp.map((x,k)=>{const u=x.w.toUpperCase();return {t:u,w:g.measureText(u).width,hot:a+k===i}});
   const lines=[]; let line=[], lw=0;
   for(const it of items){
@@ -250,19 +251,22 @@ function drawCaption(words,t){
     for(const it of L.line){ g.strokeStyle='#000'; g.strokeText(it.t,x,y); g.fillStyle=it.hot?'#F2B134':'#fff'; g.fillText(it.t,x,y); x+=it.w+sp; }
   });
 }
-function drawLabel(t){g.font='700 64px "Familjen Grotesk",Arial';g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';g.lineWidth=12;g.strokeStyle='#000';g.strokeText(t,W/2,200);g.fillStyle='#fff';g.fillText(t,W/2,200);}
+function drawLabel(t){const sc=W/720;g.font=`700 ${Math.round(64*sc)}px "Familjen Grotesk",Arial`;g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';g.lineWidth=12*sc;g.strokeStyle='#000';g.strokeText(t,W/2,200*sc);g.fillStyle='#fff';g.fillText(t,W/2,200*sc);}
 async function record(bg,speech,label){
   const vid=document.createElement('video'); vid.src=URL.createObjectURL(bg.blob); vid.muted=true; vid.loop=true; vid.playsInline=true;
   vid.style.cssText='position:fixed;left:0;top:0;width:2px;height:2px;opacity:.01;pointer-events:none'; document.body.appendChild(vid);
   await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=()=>rej(new Error('Could not read clip '+bg.name))});
   if(vid.duration>speech.duration+2) vid.currentTime=Math.random()*(vid.duration-speech.duration-1);
+  const hi=S.quality==='1080'||(S.quality==='auto'&&Math.max(vid.videoWidth,vid.videoHeight)>=1920);
+  W=hi?1080:720; H=hi?1920:1280; cv.width=W; cv.height=H;
+  log(`Output size ${W}x${H}`+(S.quality==='auto'?` (background clip is ${vid.videoWidth}x${vid.videoHeight})`:''));
   const ac=new AudioContext(); await ac.resume();
   const buf=ac.createBuffer(1,speech.pcm.length,speech.rate); buf.copyToChannel(speech.pcm,0);
   const dest=ac.createMediaStreamDestination(), src=ac.createBufferSource(); src.buffer=buf; src.connect(dest);
   const mimes=S.fmt==='mp4'?['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm']:['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
   const mime=mimes.find(m=>MediaRecorder.isTypeSupported(m));
   const stream=new MediaStream([...cv.captureStream(30).getVideoTracks(),...dest.stream.getAudioTracks()]);
-  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:6e6}), parts=[];
+  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:W>=1080?12e6:6e6}), parts=[];
   rec.ondataavailable=e=>e.data.size&&parts.push(e.data);
   rec.onerror=e=>log('Recorder error: '+((e.error&&e.error.message)||'unknown'));
   const done=new Promise(r=>rec.onstop=r);
