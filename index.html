@@ -43,7 +43,7 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 13</span></header>
+<header><h1>Story video control center</h1><span>Everything runs in your browser. Nothing is uploaded. Version 14</span></header>
 <main>
 <aside>
   <section>
@@ -66,7 +66,8 @@ progress{width:100%;height:8px;margin:10px 0 0;accent-color:var(--accent)}
     <label for="speed">Speaking speed</label><select id="speed"><option value="0.9">0.9x (slower)</option><option value="1">1x (normal)</option><option value="1.1">1.1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x (very fast)</option></select>
     <label for="wpc">Words per caption</label><input id="wpc" type="number" min="1" max="6">
     <label for="fmt">Video format</label><select id="fmt"><option value="webm">WebM (most reliable)</option><option value="mp4">MP4 (if your browser supports it)</option></select>
-    <label for="quality">Video quality</label><select id="quality"><option value="auto">Auto (match background clip)</option><option value="720">720p (720x1280)</option><option value="1080">1080p (1080x1920)</option></select>
+    <label for="quality">Video quality</label><select id="quality"><option value="auto">Auto (match background clip, up to 4K)</option><option value="720">720p (720x1280)</option><option value="1080">1080p (1080x1920)</option><option value="1440">2K (1440x2560, heavy)</option><option value="2160">4K (2160x3840, very heavy)</option></select>
+    <label for="segsec">Seconds taken from each background clip</label><input id="segsec" type="number" min="10" max="300" step="5">
     <label for="maxmin">Max length of one video (minutes)</label><input id="maxmin" type="number" min="0.5" max="10" step="0.5">
   </section>
   <section>
@@ -96,7 +97,7 @@ let W=720,H=1280; const cv=$('#cv'), g=cv.getContext('2d');
 const log = m => { const l=$('#log'); l.textContent+=m+'\n'; l.scrollTop=l.scrollHeight; };
 
 /* ---------- saved settings ---------- */
-const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1',quality:'auto'};
+const defaults={stories:'',voice:'af_heart',wpc:3,fmt:'webm',maxmin:2,speed:'1',quality:'auto',segsec:45};
 const S={...defaults,...LS.get('cc_settings',{})};
 for(const k in defaults){ const el=$('#'+k); el.value=S[k]; el.addEventListener('input',()=>{S[k]=el.type==='number'?+el.value:el.value;LS.set('cc_settings',S)}); }
 let used=new Set(LS.get('cc_used',[]));
@@ -252,37 +253,63 @@ function drawCaption(words,t){
   });
 }
 function drawLabel(t){const sc=W/720;g.font=`700 ${Math.round(64*sc)}px "Familjen Grotesk",Arial`;g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';g.lineWidth=12*sc;g.strokeStyle='#000';g.strokeText(t,W/2,200*sc);g.fillStyle='#fff';g.fillText(t,W/2,200*sc);}
-async function record(bg,speech,label){
-  const vid=document.createElement('video'); vid.src=URL.createObjectURL(bg.blob); vid.muted=true; vid.loop=true; vid.playsInline=true;
-  vid.style.cssText='position:fixed;left:0;top:0;width:2px;height:2px;opacity:.01;pointer-events:none'; document.body.appendChild(vid);
-  await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=()=>rej(new Error('Could not read clip '+bg.name))});
-  if(vid.duration>speech.duration+2) vid.currentTime=Math.random()*(vid.duration-speech.duration-1);
-  const hi=S.quality==='1080'||(S.quality==='auto'&&Math.max(vid.videoWidth,vid.videoHeight)>=1920);
-  W=hi?1080:720; H=hi?1920:1280; cv.width=W; cv.height=H;
-  log(`Output size ${W}x${H}`+(S.quality==='auto'?` (background clip is ${vid.videoWidth}x${vid.videoHeight})`:''));
-  const ac=new AudioContext(); await ac.resume();
-  const buf=ac.createBuffer(1,speech.pcm.length,speech.rate); buf.copyToChannel(speech.pcm,0);
-  const dest=ac.createMediaStreamDestination(), src=ac.createBufferSource(); src.buffer=buf; src.connect(dest);
-  const mimes=S.fmt==='mp4'?['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm']:['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
-  const mime=mimes.find(m=>MediaRecorder.isTypeSupported(m));
-  const stream=new MediaStream([...cv.captureStream(30).getVideoTracks(),...dest.stream.getAudioTracks()]);
-  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:W>=1080?12e6:6e6}), parts=[];
-  rec.ondataavailable=e=>e.data.size&&parts.push(e.data);
-  rec.onerror=e=>log('Recorder error: '+((e.error&&e.error.message)||'unknown'));
-  const done=new Promise(r=>rec.onstop=r);
-  if(document.hidden){
-    log('Voice is ready. Switch back to this tab so recording can start...');
-    await new Promise(r=>{const f=()=>{if(!document.hidden){document.removeEventListener('visibilitychange',f);r()}};document.addEventListener('visibilitychange',f)});
+function loadClip(bg){
+  const v=document.createElement('video'); v.src=URL.createObjectURL(bg.blob); v.muted=true; v.loop=true; v.playsInline=true; v.preload='auto';
+  v.style.cssText='position:fixed;left:0;top:0;width:2px;height:2px;opacity:.01;pointer-events:none'; document.body.appendChild(v);
+  return new Promise((res,rej)=>{ v.onloadedmetadata=()=>res(v);
+    v.onerror=()=>{ disposeClip(v); rej(new Error('Could not read clip '+bg.name+'. Phone videos in HEVC/H.265 often will not play in Chrome. Re-save it as an H.264 MP4.')); }; });
+}
+function disposeClip(v){ try{v.pause()}catch{} const u=v.src; v.remove(); URL.revokeObjectURL(u); }
+const seekTo=(v,t)=>new Promise(r=>{ if(Math.abs(v.currentTime-t)<0.05){r();return} v.onseeked=()=>{v.onseeked=null;r()}; v.currentTime=t; setTimeout(r,2000); });
+async function record(bgs,speech,label){
+  const segSec=Math.max(5,+S.segsec||45);
+  const order=[...bgs].sort(()=>Math.random()-.5);
+  const nSeg=Math.max(1,Math.ceil(speech.duration/segSec)), use=order.slice(0,Math.min(order.length,nSeg));
+  const clips=[]; let ac;
+  try{
+    for(const b of use) clips.push(await loadClip(b));
+    const n=clips.length, startFor=v=>v.duration>segSec+1?Math.random()*(v.duration-segSec-1):0;
+    const longSide=Math.max(...clips.map(v=>Math.max(v.videoWidth,v.videoHeight)));
+    const tier=S.quality==='auto'?(longSide>=3800?2160:longSide>=2500?1440:longSide>=1900?1080:720):+S.quality;
+    W=tier; H=tier*16/9; cv.width=W; cv.height=H;
+    log(`Output ${W}x${H}`+(S.quality==='auto'?` (largest background clip side: ${longSide}px)`:'')+(n>1?`. Switching between ${n} clips every ${segSec} seconds.`:''));
+    await seekTo(clips[0],startFor(clips[0]));
+    ac=new AudioContext(); await ac.resume();
+    const buf=ac.createBuffer(1,speech.pcm.length,speech.rate); buf.copyToChannel(speech.pcm,0);
+    const dest=ac.createMediaStreamDestination(), src=ac.createBufferSource(); src.buffer=buf; src.connect(dest);
+    const mimes=S.fmt==='mp4'?['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm']:['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'];
+    const mime=mimes.find(m=>MediaRecorder.isTypeSupported(m));
+    const bits={720:6e6,1080:12e6,1440:20e6,2160:40e6}[tier]||12e6;
+    const stream=new MediaStream([...cv.captureStream(30).getVideoTracks(),...dest.stream.getAudioTracks()]);
+    const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:bits}), parts=[];
+    rec.ondataavailable=e=>e.data.size&&parts.push(e.data);
+    rec.onerror=e=>log('Recorder error: '+((e.error&&e.error.message)||'unknown'));
+    const done=new Promise(r=>rec.onstop=r);
+    if(document.hidden){
+      log('Voice is ready. Switch back to this tab so recording can start...');
+      await new Promise(r=>{const f=()=>{if(!document.hidden){document.removeEventListener('visibilitychange',f);r()}};document.addEventListener('visibilitychange',f)});
+    }
+    for(let k=0;;k++){ try{ await clips[0].play(); break; }catch(e){ if(k>=3) throw e; await new Promise(r=>setTimeout(r,500)); } }
+    let cur=clips[0], curSeg=0, pre=0;
+    rec.start(500); const t0=ac.currentTime; src.start();
+    const timer=setInterval(()=>{ try{
+      const t=ac.currentTime-t0, seg=Math.floor(t/segSec);
+      if(n>1){
+        if(seg!==curSeg){ const nx=clips[seg%n]; if(nx!==cur){ cur.pause(); cur=nx; cur.play().catch(()=>{}); } curSeg=seg; }
+        else if(pre!==seg+1&&t>(seg+1)*segSec-2){ const nx=clips[(seg+1)%n]; nx.pause(); nx.currentTime=startFor(nx); pre=seg+1; }
+      }
+      if(cur.paused&&!document.hidden) cur.play().catch(()=>{});
+      drawBg(cur); drawCaption(speech.words,t); if(label) drawLabel(label);
+    }catch(e){ log('Draw error: '+e.message); } },33);
+    src.onended=()=>setTimeout(()=>{clearInterval(timer);rec.stop()},400);
+    await done;
+    const blob=new Blob(parts,{type:mime.split(';')[0]});
+    if(blob.size<Math.max(2000,speech.duration*30000)) throw new Error('Recording is too small ('+(blob.size/1e6).toFixed(2)+' MB for '+Math.round(speech.duration)+' seconds), so the picture is probably missing. Format used: '+mime+'. Try a lower video quality or the other format under Voice and captions.');
+    log('Recorded '+(blob.size/1e6).toFixed(1)+' MB as '+mime);
+    return {blob,ext:mime.startsWith('video/mp4')?'mp4':'webm'};
+  } finally {
+    clips.forEach(disposeClip); if(ac) ac.close().catch(()=>{});
   }
-  for(let k=0;;k++){ try{ await vid.play(); break; }catch(e){ if(k>=3) throw e; await new Promise(r=>setTimeout(r,500)); } }
-  rec.start(500); const t0=ac.currentTime; src.start(); let live=true;
-  src.onended=()=>setTimeout(()=>{live=false;clearInterval(timer);rec.stop()},400);
-  const timer=setInterval(()=>{ try{ if(vid.paused&&!document.hidden) vid.play().catch(()=>{}); drawBg(vid); drawCaption(speech.words,ac.currentTime-t0); if(label) drawLabel(label); }catch(e){ log('Draw error: '+e.message); } },33);
-  await done; vid.pause(); vid.remove(); URL.revokeObjectURL(vid.src); ac.close();
-  const blob=new Blob(parts,{type:mime.split(';')[0]});
-  if(blob.size<Math.max(2000,speech.duration*30000)) throw new Error('Recording is too small ('+(blob.size/1e6).toFixed(2)+' MB for '+Math.round(speech.duration)+' seconds), so the picture is probably missing. Format used: '+mime+'. Try the other format under Voice and captions.');
-  log('Recorded '+(blob.size/1e6).toFixed(1)+' MB as '+mime);
-  return {blob,ext:mime.startsWith('video/mp4')?'mp4':'webm'};
 }
 
 /* ---------- voice preview (plays automatically when you pick a voice or speed) ---------- */
@@ -320,9 +347,9 @@ $('#go').onclick=async()=>{
       const parts=splitParts(await speak(story));
       if(parts.length>1) log(`Splitting into ${parts.length} parts.`);
       for(let i=0;i<parts.length;i++){
-        const multi=parts.length>1, bg=bgs[Math.floor(Math.random()*bgs.length)];
-        log(`Recording ${multi?'part '+(i+1)+' of '+parts.length:'video'} with ${bg.name} (${Math.round(parts[i].duration)} seconds)...`);
-        const out=await record(bg,parts[i],multi?'PART '+(i+1):'');
+        const multi=parts.length>1;
+        log(`Recording ${multi?'part '+(i+1)+' of '+parts.length:'video'} (${Math.round(parts[i].duration)} seconds) using ${bgs.length} background clip${bgs.length>1?'s':''}...`);
+        const out=await record(bgs,parts[i],multi?'PART '+(i+1):'');
         const url=URL.createObjectURL(out.blob), d=document.createElement('div'); d.className='vid';
         const file=new File([out.blob],`${story.id}${multi?'_part'+(i+1):''}.${out.ext}`,{type:out.blob.type});
         const canShare=!!(navigator.canShare&&navigator.canShare({files:[file]}));
